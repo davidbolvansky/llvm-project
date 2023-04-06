@@ -1472,7 +1472,7 @@ static void AddAssumptionsFromCallSiteAttrs(CallBase &CB, InlineFunctionInfo &IF
   for (Argument &Arg : CalledFunc->args()) {
     unsigned ArgNo = Arg.getArgNo();
     auto *ArgVal = CB.getArgOperand(ArgNo);
-    if (CB.getAttributes().hasParamAttr(ArgNo, Attribute::NonNull)) { // && !isKnownNonZero(ArgVal, DL, 0, AC)) {
+    if (CB.getAttributes().hasParamAttr(ArgNo, Attribute::NonNull) && !isKnownNonZero(ArgVal, DL, 0, AC)) {
       CallInst *NewAsmp = Builder.CreateNonNullAssumption(CB.getArgOperand(ArgNo));
       AC->registerAssumption(cast<AssumeInst>(NewAsmp));
     }
