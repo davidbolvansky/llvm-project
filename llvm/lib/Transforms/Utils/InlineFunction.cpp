@@ -1465,12 +1465,14 @@ static void AddAssumptionsFromCallSiteAttrs(CallBase &CB, InlineFunctionInfo &IF
     return;
 
   AssumptionCache *AC = &IFI.GetAssumptionCache(*CB.getCaller());
+  auto &DL = CB.getCaller()->getParent()->getDataLayout();
   Function *CalledFunc = CB.getCalledFunction();
   IRBuilder<> Builder(&CB);
 
   for (Argument &Arg : CalledFunc->args()) {
     unsigned ArgNo = Arg.getArgNo();
-    if (CB.paramHasAttr(ArgNo, Attribute::NonNull)) {
+    auto *ArgVal = CB.getArgOperand(ArgNo);
+    if (CB.paramHasAttr(ArgNo, Attribute::NonNull) && !isKnownNonZero(ArgVal, DL, 0, AC)) {
       CallInst *NewAsmp = Builder.CreateNonNullAssumption(CB.getArgOperand(ArgNo));
       AC->registerAssumption(cast<AssumeInst>(NewAsmp));
     }
