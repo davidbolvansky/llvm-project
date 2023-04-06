@@ -1460,6 +1460,25 @@ static void AddAlignmentAssumptions(CallBase &CB, InlineFunctionInfo &IFI) {
   }
 }
 
+static void AddAssumptionsFromCallSiteAttrs(CallBase &CB, InlineFunctionInfo &IFI) {
+  if (!IFI.GetAssumptionCache)
+    return;
+
+  AssumptionCache *AC = &IFI.GetAssumptionCache(*CB.getCaller());
+  auto &DL = CB.getCaller()->getParent()->getDataLayout();
+  Function *CalledFunc = CB.getCalledFunction();
+  IRBuilder<> Builder(&CB);
+
+  for (Argument &Arg : CalledFunc->args()) {
+    unsigned ArgNo = Arg.getArgNo();
+    auto *ArgVal = CB.getArgOperand(ArgNo);
+    if (CB.getAttributes().hasParamAttr(ArgNo, Attribute::NonNull) && !isKnownNonZero(ArgVal, DL, 0, AC)) {
+      CallInst *NewAsmp = Builder.CreateNonNullAssumption(CB.getArgOperand(ArgNo));
+      AC->registerAssumption(cast<AssumeInst>(NewAsmp));
+    }
+  }
+}
+
 static void HandleByValArgumentInit(Type *ByValType, Value *Dst, Value *Src,
                                     Module *M, BasicBlock *InsertBlock,
                                     InlineFunctionInfo &IFI,
@@ -2129,6 +2148,8 @@ llvm::InlineResult llvm::InlineFunction(CallBase &CB, InlineFunctionInfo &IFI,
 
       VMap[&*I] = ActualArg;
     }
+
+    AddAssumptionsFromCallSiteAttrs(CB, IFI);
 
     // TODO: Remove this when users have been updated to the assume bundles.
     // Add alignment assumptions if necessary. We do this before the inlined
