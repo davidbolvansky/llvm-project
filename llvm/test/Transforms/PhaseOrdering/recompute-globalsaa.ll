@@ -9,17 +9,8 @@
 define i32 @main() {
 ; CHECK-LABEL: @main(
 ; CHECK-NEXT:  entry:
-; CHECK-NEXT:    store i32 1, ptr @a, align 4
-; CHECK-NEXT:    call void @llvm.assume(i1 true) [ "nonnull"(ptr @a) ]
 ; CHECK-NEXT:    [[TMP0:%.*]] = load ptr, ptr @e, align 8
 ; CHECK-NEXT:    store i32 0, ptr [[TMP0]], align 4
-; CHECK-NEXT:    [[TMP1:%.*]] = load i32, ptr @a, align 4
-; CHECK-NEXT:    [[TOBOOL_NOT_I:%.*]] = icmp eq i32 [[TMP1]], 0
-; CHECK-NEXT:    br i1 [[TOBOOL_NOT_I]], label [[IF_THEN_I:%.*]], label [[BAR_EXIT:%.*]]
-; CHECK:       if.then.i:
-; CHECK-NEXT:    tail call void @foo()
-; CHECK-NEXT:    br label [[BAR_EXIT]]
-; CHECK:       bar.exit:
 ; CHECK-NEXT:    store ptr null, ptr @e, align 8
 ; CHECK-NEXT:    ret i32 0
 ;
