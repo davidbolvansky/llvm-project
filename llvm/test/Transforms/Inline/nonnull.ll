@@ -54,6 +54,7 @@ done:
 define void @caller(ptr nonnull %arg) {
 ; CHECK-LABEL: define void @caller
 ; CHECK-SAME: (ptr nonnull [[ARG:%.*]]) {
+; CHECK-NEXT:    call void @llvm.assume(i1 true) [ "nonnull"(ptr [[ARG]]) ]
 ; CHECK-NEXT:    call void @bar()
 ; CHECK-NEXT:    ret void
 ;
