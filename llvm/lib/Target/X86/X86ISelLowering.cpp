@@ -26365,6 +26365,7 @@ SDValue X86TargetLowering::LowerSELECT(SDValue Op, SelectionDAG &DAG) const {
 
   // X86ISD::CMOV means set the result (which is operand 1) to the RHS if
   // condition is true.
+  SelectionDAG::FlagInserter FlagsInserter(DAG, Op->getFlags());
   SDValue Ops[] = { Op2, Op1, CC, Cond };
   return DAG.getNode(X86ISD::CMOV, DL, Op.getValueType(), Ops);
 }

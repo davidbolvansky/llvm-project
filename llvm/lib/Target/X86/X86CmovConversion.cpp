@@ -305,6 +305,9 @@ bool X86CmovConverterPass::collectCmovCandidates(
       // Skip debug instructions.
       if (I.isDebugInstr())
         continue;
+      // If cmov instruction is marked as unpredicatable, do not convert it to branch.
+      if (I.getFlag(MachineInstr::MIFlag::Unpredictable))
+        continue;
       X86::CondCode CC = X86::getCondFromCMov(I);
       // Check if we found a X86::CMOVrr instruction.
       if (CC != X86::COND_INVALID && (IncludeLoads || !I.mayLoad())) {
