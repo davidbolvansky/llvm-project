@@ -287,15 +287,24 @@ struct CastedValue {
   /// Whether trunc(V) is non-negative.
   bool IsNonNegative = false;
 
-  explicit CastedValue(const Value *V) : V(V) {}
+  explicit CastedValue(const Value *V) : V(V) {
+    assert(V->getType()->isIntegerTy() &&
+           "CastedValue requires an integer value");
+  }
   explicit CastedValue(const Value *V, unsigned ZExtBits, unsigned SExtBits,
                        unsigned TruncBits, bool IsNonNegative)
       : V(V), ZExtBits(ZExtBits), SExtBits(SExtBits), TruncBits(TruncBits),
-        IsNonNegative(IsNonNegative) {}
+        IsNonNegative(IsNonNegative) {
+    assert(V->getType()->isIntegerTy() &&
+           "CastedValue requires an integer value");
+  }
+
+  unsigned getOriginalBitWidth() const {
+    return V->getType()->getIntegerBitWidth();
+  }
 
   unsigned getBitWidth() const {
-    return V->getType()->getPrimitiveSizeInBits() - TruncBits + ZExtBits +
-           SExtBits;
+    return getOriginalBitWidth() - TruncBits + ZExtBits + SExtBits;
   }
 
   CastedValue withValue(const Value *NewV, bool PreserveNonNeg) const {
@@ -305,8 +314,8 @@ struct CastedValue {
 
   /// Replace V with zext(NewV)
   CastedValue withZExtOfValue(const Value *NewV, bool ZExtNonNegative) const {
-    unsigned ExtendBy = V->getType()->getPrimitiveSizeInBits() -
-                        NewV->getType()->getPrimitiveSizeInBits();
+    unsigned ExtendBy =
+        getOriginalBitWidth() - NewV->getType()->getIntegerBitWidth();
     if (ExtendBy <= TruncBits)
       // zext<nneg>(trunc(zext(NewV))) == zext<nneg>(trunc(NewV))
       // The nneg can be preserved on the outer zext here.
@@ -325,8 +334,8 @@ struct CastedValue {
 
   /// Replace V with sext(NewV)
   CastedValue withSExtOfValue(const Value *NewV) const {
-    unsigned ExtendBy = V->getType()->getPrimitiveSizeInBits() -
-                        NewV->getType()->getPrimitiveSizeInBits();
+    unsigned ExtendBy =
+        getOriginalBitWidth() - NewV->getType()->getIntegerBitWidth();
     if (ExtendBy <= TruncBits)
       // zext<nneg>(trunc(sext(NewV))) == zext<nneg>(trunc(NewV))
       // The nneg can be preserved on the outer zext here
@@ -341,29 +350,35 @@ struct CastedValue {
   }
 
   APInt evaluateWith(APInt N) const {
-    assert(N.getBitWidth() == V->getType()->getPrimitiveSizeInBits() &&
+    assert(N.getBitWidth() == getOriginalBitWidth() &&
            "Incompatible bit width");
-    if (TruncBits) N = N.trunc(N.getBitWidth() - TruncBits);
-    if (SExtBits) N = N.sext(N.getBitWidth() + SExtBits);
-    if (ZExtBits) N = N.zext(N.getBitWidth() + ZExtBits);
+    if (TruncBits)
+      N = N.trunc(N.getBitWidth() - TruncBits);
+    if (SExtBits)
+      N = N.sext(N.getBitWidth() + SExtBits);
+    if (ZExtBits)
+      N = N.zext(N.getBitWidth() + ZExtBits);
     return N;
   }
 
   ConstantRange evaluateWith(ConstantRange N) const {
-    assert(N.getBitWidth() == V->getType()->getPrimitiveSizeInBits() &&
+    assert(N.getBitWidth() == getOriginalBitWidth() &&
            "Incompatible bit width");
-    if (TruncBits) N = N.truncate(N.getBitWidth() - TruncBits);
+    if (TruncBits)
+      N = N.truncate(N.getBitWidth() - TruncBits);
     if (IsNonNegative && !N.isAllNonNegative())
       N = N.intersectWith(
           ConstantRange(APInt::getZero(N.getBitWidth()),
                         APInt::getSignedMinValue(N.getBitWidth())));
-    if (SExtBits) N = N.signExtend(N.getBitWidth() + SExtBits);
-    if (ZExtBits) N = N.zeroExtend(N.getBitWidth() + ZExtBits);
+    if (SExtBits)
+      N = N.signExtend(N.getBitWidth() + SExtBits);
+    if (ZExtBits)
+      N = N.zeroExtend(N.getBitWidth() + ZExtBits);
     return N;
   }
 
   KnownBits evaluateWith(KnownBits K) const {
-    assert(K.getBitWidth() == V->getType()->getPrimitiveSizeInBits() &&
+    assert(K.getBitWidth() == getOriginalBitWidth() &&
            "Incompatible bit width");
     if (TruncBits)
       K = K.trunc(K.getBitWidth() - TruncBits);
@@ -2002,7 +2017,7 @@ std::optional<APInt> BasicAAResult::computeMinAbsVarOffset(
     if (Var.IsNSW)
       return true;
 
-    int ValOrigBW = Var.Val.V->getType()->getPrimitiveSizeInBits();
+    int ValOrigBW = Var.Val.getOriginalBitWidth();
     // If Scale is small enough so that abs(V*Scale) >= abs(Scale) holds.
     // The max value of abs(V) is 2^ValOrigBW - 1. Multiplying with a
     // constant smaller than 2^(bitwidth(Val) - ValOrigBW) won't wrap.
