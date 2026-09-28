@@ -50,7 +50,6 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include <vector>
 
 namespace llvm {
 
@@ -592,9 +591,9 @@ private:
 
   const TargetLibraryInfo &TLI;
 
-  std::vector<std::unique_ptr<Concept>> AAs;
+  SmallVector<std::unique_ptr<Concept>, 4> AAs;
 
-  std::vector<AnalysisKey *> AADeps;
+  SmallVector<AnalysisKey *, 4> AADeps;
 
   friend class BatchAAResults;
 };
