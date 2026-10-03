@@ -64,3 +64,46 @@ body:
 exit:
   ret void
 }
+
+; CHECK-LABEL: Function: nonadjacent_guard
+; CHECK: NoAlias: i32* %element, i32* %field
+define void @nonadjacent_guard(ptr %base, i32 %index, i1 %choice) {
+entry:
+  %cmp = icmp ult i32 %index, 4
+  br i1 %cmp, label %split, label %exit
+split:
+  br i1 %choice, label %left, label %right
+left:
+  br label %body
+right:
+  br label %body
+body:
+  %idx = zext i32 %index to i64
+  %element = getelementptr i32, ptr %base, i64 %idx
+  %field = getelementptr i32, ptr %base, i64 4
+  load i32, ptr %element
+  store i32 0, ptr %field
+  br label %exit
+exit:
+  ret void
+}
+
+; The unconstrained path prevents the comparison from bounding the access.
+; CHECK-LABEL: Function: nondominating_guard
+; CHECK: MayAlias: i32* %element, i32* %field
+define void @nondominating_guard(ptr %base, i32 %index, i1 %choice) {
+entry:
+  br i1 %choice, label %check, label %body
+check:
+  %cmp = icmp ult i32 %index, 4
+  br i1 %cmp, label %body, label %exit
+body:
+  %idx = zext i32 %index to i64
+  %element = getelementptr i32, ptr %base, i64 %idx
+  %field = getelementptr i32, ptr %base, i64 4
+  load i32, ptr %element
+  store i32 0, ptr %field
+  br label %exit
+exit:
+  ret void
+}

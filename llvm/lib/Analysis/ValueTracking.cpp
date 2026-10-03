@@ -10760,6 +10760,43 @@ static void setLimitForFPToI(const Instruction *I, APInt &Lower, APInt &Upper) {
   }
 }
 
+static std::optional<ConstantRange>
+getRangeFromBranchCondition(const Value *V, const Value *Condition,
+                            bool Taken) {
+  auto *Cmp = dyn_cast<ICmpInst>(Condition);
+  if (!Cmp)
+    return std::nullopt;
+  auto Predicate = Cmp->getPredicate();
+  const Value *RHS = Cmp->getOperand(1);
+  if (RHS == V) {
+    Predicate = Cmp->getSwappedPredicate();
+    RHS = Cmp->getOperand(0);
+  } else if (Cmp->getOperand(0) != V) {
+    return std::nullopt;
+  }
+  auto *C = dyn_cast<ConstantInt>(RHS);
+  if (!C)
+    return std::nullopt;
+  if (!Taken)
+    Predicate = ICmpInst::getInversePredicate(Predicate);
+  return ConstantRange::makeExactICmpRegion(Predicate, C->getValue());
+}
+
+static std::optional<ConstantRange>
+getRangeFromDominatingBranch(const Value *V, const CondBrInst *BI,
+                             const BasicBlock *BB, const DominatorTree &DT) {
+  if (BI->getSuccessor(0) == BI->getSuccessor(1))
+    return std::nullopt;
+  // Filter unrelated comparisons before asking about edge dominance.
+  auto *Cmp = dyn_cast<ICmpInst>(BI->getCondition());
+  if (!Cmp || (Cmp->getOperand(0) != V && Cmp->getOperand(1) != V))
+    return std::nullopt;
+  for (unsigned I = 0; I != 2; ++I)
+    if (DT.dominates(BasicBlockEdge(BI->getParent(), BI->getSuccessor(I)), BB))
+      return getRangeFromBranchCondition(V, Cmp, I == 0);
+  return std::nullopt;
+}
+
 ConstantRange llvm::computeConstantRange(const Value *V, bool ForSigned,
                                          const SimplifyQuery &SQ,
                                          unsigned Depth) {
@@ -10885,30 +10922,44 @@ ConstantRange llvm::computeConstantRange(const Value *V, bool ForSigned,
     }
   }
 
-  // A single incoming edge makes its branch condition valid at the context.
-  // Use that constraint independently of how V was computed.
   if (SQ.CtxI && !CR.isSingleElement()) {
     const BasicBlock *BB = SQ.CtxI->getParent();
-    const BasicBlock *Pred = BB->getSinglePredecessor();
-    auto *BI = Pred ? dyn_cast<CondBrInst>(Pred->getTerminator()) : nullptr;
-    if (BI && BI->getSuccessor(0) != BI->getSuccessor(1)) {
-      auto *Cmp = dyn_cast<ICmpInst>(BI->getCondition());
-      if (Cmp) {
-        auto Predicate = Cmp->getPredicate();
-        const Value *RHS = Cmp->getOperand(1);
-        if (Cmp->getOperand(1) == V) {
-          Predicate = Cmp->getSwappedPredicate();
-          RHS = Cmp->getOperand(0);
-        } else if (Cmp->getOperand(0) != V) {
-          RHS = nullptr;
+    if (SQ.DT) {
+      unsigned Budget = 8;
+      if (SQ.DC) {
+        // InstCombine may query before registering the predecessor branch.
+        if (const BasicBlock *Pred = BB->getSinglePredecessor()) {
+          auto *BI = dyn_cast<CondBrInst>(Pred->getTerminator());
+          if (BI && BI->getSuccessor(0) != BI->getSuccessor(1))
+            if (auto Range = getRangeFromBranchCondition(
+                    V, BI->getCondition(), BI->getSuccessor(0) == BB))
+              CR = CR.intersectWith(*Range);
         }
-        if (auto *C = dyn_cast_or_null<ConstantInt>(RHS)) {
-          if (BI->getSuccessor(0) != BB)
-            Predicate = ICmpInst::getInversePredicate(Predicate);
-          CR = CR.intersectWith(
-              ConstantRange::makeExactICmpRegion(Predicate, C->getValue()));
+        for (const CondBrInst *BI : SQ.DC->conditionsFor(V)) {
+          if (!Budget)
+            break;
+          --Budget;
+          if (auto Range = getRangeFromDominatingBranch(V, BI, BB, *SQ.DT))
+            CR = CR.intersectWith(*Range);
+        }
+      } else {
+        // Bound the fallback walk when the caller has no condition cache.
+        Budget = 4;
+        auto *Node = SQ.DT->getNode(BB);
+        while (Budget && Node && (Node = Node->getIDom())) {
+          --Budget;
+          auto *BI = dyn_cast<CondBrInst>(Node->getBlock()->getTerminator());
+          if (BI)
+            if (auto Range = getRangeFromDominatingBranch(V, BI, BB, *SQ.DT))
+              CR = CR.intersectWith(*Range);
         }
       }
+    } else if (const BasicBlock *Pred = BB->getSinglePredecessor()) {
+      auto *BI = dyn_cast<CondBrInst>(Pred->getTerminator());
+      if (BI && BI->getSuccessor(0) != BI->getSuccessor(1))
+        if (auto Range = getRangeFromBranchCondition(V, BI->getCondition(),
+                                                     BI->getSuccessor(0) == BB))
+          CR = CR.intersectWith(*Range);
     }
   }
 
