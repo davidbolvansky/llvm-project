@@ -603,7 +603,6 @@ struct BasicAAResult::DecomposedGEP {
 // Results of analyzing variable GEP indices for offset-based disambiguation.
 struct BasicAAResult::VariableGEPOffsetInfo {
   APInt GCD;
-  ConstantRange OffsetRange;
   SmallVector<KnownBits, 4> VarIndexKnownBits;
 };
 
@@ -1317,9 +1316,8 @@ AliasResult BasicAAResult::aliasGEP(
     return AliasResult::MayAlias;
 
   // Analyze the variable indices, and compute the GCD that the total
-  // variable offset is guaranteed to be a multiple of, and its approximate
-  // range.
-  auto [GCD, OffsetRange, VIKnownBits] = analyzeVariableOffsets(DecompGEP1, DT);
+  // variable offset is guaranteed to be a multiple of.
+  auto [GCD, VIKnownBits] = analyzeVariableOffsets(DecompGEP1, DT);
 
   // We now have accesses at two offsets from the same base:
   //  1. (...)*GCD + DecompGEP1.Offset with size V1Size
@@ -1333,6 +1331,32 @@ AliasResult BasicAAResult::aliasGEP(
   if (ModOffset.uge(V2Size.getValue()) &&
       (GCD - ModOffset).uge(V1Size.getValue()))
     return AliasResult::NoAlias;
+
+  // Compute offset ranges only if the GCD check did not prove NoAlias.
+  ConstantRange OffsetRange(DecompGEP1.Offset);
+  for (unsigned I = 0, E = DecompGEP1.VarIndices.size(); I != E; ++I) {
+    const VariableGEPIndex &Index = DecompGEP1.VarIndices[I];
+    const APInt &Scale = Index.Scale;
+    SimplifyQuery SQ(DL, DT, &AC, Index.CtxI, /*UseInstrInfo=*/true);
+    ConstantRange CR =
+        computeConstantRange(Index.Val.V, /*ForSigned=*/false, SQ);
+    CR = CR.intersectWith(
+        ConstantRange::fromKnownBits(VIKnownBits[I], /*IsSigned=*/true),
+        ConstantRange::Signed);
+    CR = Index.Val.evaluateWith(CR).sextOrTrunc(OffsetRange.getBitWidth());
+
+    assert(OffsetRange.getBitWidth() == Scale.getBitWidth() &&
+           "Bit widths are normalized to MaxIndexSize");
+    if (Index.IsNSW)
+      CR = CR.smul_sat(ConstantRange(Scale));
+    else
+      CR = CR.smul_fast(ConstantRange(Scale));
+
+    if (Index.IsNegated)
+      OffsetRange = OffsetRange.sub(CR);
+    else
+      OffsetRange = OffsetRange.add(CR);
+  }
 
   // If the ranges of potentially accessed bytes are disjoint, there cannot be
   // any overlap.
@@ -1936,7 +1960,6 @@ BasicAAResult::VariableGEPOffsetInfo
 BasicAAResult::analyzeVariableOffsets(const DecomposedGEP &GEP,
                                       DominatorTree *DT) {
   APInt GCD;
-  ConstantRange OffsetRange(GEP.Offset);
   SmallVector<KnownBits, 4> VarIndexKnownBits;
   VarIndexKnownBits.reserve(GEP.VarIndices.size());
 
@@ -1969,27 +1992,10 @@ BasicAAResult::analyzeVariableOffsets(const DecomposedGEP &GEP,
     else
       GCD = APIntOps::GreatestCommonDivisor(GCD, ScaleForGCD.abs());
 
-    ConstantRange CR =
-        computeConstantRange(Index.Val.V, /*ForSigned=*/false, SQ);
-    CR =
-        CR.intersectWith(ConstantRange::fromKnownBits(Known, /*IsSigned=*/true),
-                         ConstantRange::Signed);
-    CR = Index.Val.evaluateWith(CR).sextOrTrunc(OffsetRange.getBitWidth());
 
-    assert(OffsetRange.getBitWidth() == Scale.getBitWidth() &&
-           "Bit widths are normalized to MaxIndexSize");
-    if (Index.IsNSW)
-      CR = CR.smul_sat(ConstantRange(Scale));
-    else
-      CR = CR.smul_fast(ConstantRange(Scale));
-
-    if (Index.IsNegated)
-      OffsetRange = OffsetRange.sub(CR);
-    else
-      OffsetRange = OffsetRange.add(CR);
   }
 
-  return {GCD, OffsetRange, std::move(VarIndexKnownBits)};
+  return {GCD, std::move(VarIndexKnownBits)};
 }
 
 std::optional<APInt> BasicAAResult::computeMinAbsVarOffset(
