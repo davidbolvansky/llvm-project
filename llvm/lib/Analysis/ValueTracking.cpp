@@ -10885,6 +10885,33 @@ ConstantRange llvm::computeConstantRange(const Value *V, bool ForSigned,
     }
   }
 
+  // A single incoming edge makes its branch condition valid at the context.
+  // Use that constraint independently of how V was computed.
+  if (SQ.CtxI && !CR.isSingleElement()) {
+    const BasicBlock *BB = SQ.CtxI->getParent();
+    const BasicBlock *Pred = BB->getSinglePredecessor();
+    auto *BI = Pred ? dyn_cast<CondBrInst>(Pred->getTerminator()) : nullptr;
+    if (BI && BI->getSuccessor(0) != BI->getSuccessor(1)) {
+      auto *Cmp = dyn_cast<ICmpInst>(BI->getCondition());
+      if (Cmp) {
+        auto Predicate = Cmp->getPredicate();
+        const Value *RHS = Cmp->getOperand(1);
+        if (Cmp->getOperand(1) == V) {
+          Predicate = Cmp->getSwappedPredicate();
+          RHS = Cmp->getOperand(0);
+        } else if (Cmp->getOperand(0) != V) {
+          RHS = nullptr;
+        }
+        if (auto *C = dyn_cast_or_null<ConstantInt>(RHS)) {
+          if (BI->getSuccessor(0) != BB)
+            Predicate = ICmpInst::getInversePredicate(Predicate);
+          CR = CR.intersectWith(
+              ConstantRange::makeExactICmpRegion(Predicate, C->getValue()));
+        }
+      }
+    }
+  }
+
   return CR;
 }
 
