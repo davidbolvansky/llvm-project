@@ -2016,14 +2016,11 @@ std::optional<APInt> BasicAAResult::computeMinAbsVarOffset(
   if (VarIndices.size() == 1) {
     // VarIndex = Scale*V.
     const VariableGEPIndex &Var = VarIndices[0];
-    if (Var.Val.TruncBits == 0 &&
-        isKnownNonZero(Var.Val.V, SimplifyQuery(DL, DT, &AC, Var.CtxI))) {
-      // Refine MinAbsVarIndex, if abs(Scale*V) >= abs(Scale) holds in the
-      // presence of potentially wrapping math.
-      if (MultiplyByScaleNoWrap(Var)) {
-        // If V != 0 then abs(VarIndex) >= abs(Scale).
-        return Var.Scale.abs();
-      }
+    if (Var.Val.TruncBits == 0 && MultiplyByScaleNoWrap(Var) &&
+        (VIKnownBits[0].isNonZero() ||
+         isKnownNonZero(Var.Val.V, SimplifyQuery(DL, DT, &AC, Var.CtxI)))) {
+      // If V != 0 then abs(VarIndex) >= abs(Scale).
+      return Var.Scale.abs();
     }
     return std::nullopt;
   }
