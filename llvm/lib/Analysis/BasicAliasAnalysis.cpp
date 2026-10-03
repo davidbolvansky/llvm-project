@@ -2057,7 +2057,9 @@ std::optional<APInt> BasicAAResult::computeMinAbsVarOffset(
       return std::nullopt;
 
     if (Var0.hasNegatedScaleOf(Var1)) {
-      if (isKnownNonEqual(Var0.Val.V, Var1.Val.V,
+      if (VIKnownBits[0].Zero.intersects(VIKnownBits[1].One) ||
+          VIKnownBits[1].Zero.intersects(VIKnownBits[0].One) ||
+          isKnownNonEqual(Var0.Val.V, Var1.Val.V,
                           SimplifyQuery(DL, DT, &AC, /*CtxI=*/Var0.CtxI
                                                          ? Var0.CtxI
                                                          : Var1.CtxI)))
