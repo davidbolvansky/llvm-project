@@ -160,6 +160,34 @@ TEST(EquivalenceClassesTest, MembersIterator) {
   EXPECT_THAT(EC.members(1), testing::ElementsAre(5, 1, 2));
 }
 
+TEST(EquivalenceClassesTest, EraseClassPreservesIterationOrder) {
+  EquivalenceClasses<int> EC;
+  for (int I = 0; I != 8; ++I)
+    EC.insert(I);
+  EC.unionSets(1, 3);
+  EC.unionSets(1, 5);
+  EC.unionSets(1, 7);
+  EC.unionSets(0, 2);
+
+  EC.eraseClass(5);
+  EC.eraseClass(99);
+  SmallVector<int> Remaining;
+  for (const auto *Member : EC)
+    Remaining.push_back(Member->getData());
+  EXPECT_THAT(Remaining, testing::ElementsAre(0, 2, 4, 6));
+  EXPECT_THAT(EC.members(2), testing::ElementsAre(0, 2));
+  EXPECT_EQ(EC.getNumClasses(), 3u);
+
+  EC.insert(5);
+  EXPECT_THAT(EC.members(5), testing::ElementsAre(5));
+  EC.eraseClass(2);
+  EC.eraseClass(4);
+  EC.eraseClass(6);
+  EC.eraseClass(5);
+  EXPECT_TRUE(EC.empty());
+  EXPECT_EQ(EC.begin(), EC.end());
+}
+
 // Type-parameterized tests: Run the same test cases with different element
 // types.
 template <typename T> class ParameterizedTest : public testing::Test {};

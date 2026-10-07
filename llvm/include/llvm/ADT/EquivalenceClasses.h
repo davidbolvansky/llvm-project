@@ -303,12 +303,12 @@ public:
     for (member_iterator MI = LeaderI.begin(), ME = LeaderI.end(); MI != ME;) {
       const ElemTy &ToErase = *MI;
       ++MI;
-      const ECValue *Cur = TheMapping[ToErase];
       TheMapping.erase(ToErase);
-      auto I = find(Members, Cur);
-      assert(I != Members.end() && "Can't find input in members!");
-      Members.erase(I);
     }
+    // Compact once, preserving the iteration order of the remaining members.
+    llvm::erase_if(Members, [&](const ECValue *Member) {
+      return !TheMapping.contains(Member->getData());
+    });
   }
 
   /// Merge the two equivalence sets for the specified values, inserting
