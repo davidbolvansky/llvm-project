@@ -160,6 +160,24 @@ TEST(EquivalenceClassesTest, MembersIterator) {
   EXPECT_THAT(EC.members(1), testing::ElementsAre(5, 1, 2));
 }
 
+TEST(EquivalenceClassesTest, DeepMergePreservesLeaderAndMembers) {
+  EquivalenceClasses<int> EC;
+  EC.insert(0);
+  for (int I = 1; I != 256; ++I)
+    EC.unionSets(I, I - 1);
+
+  for (int I = 0; I != 256; ++I)
+    EXPECT_EQ(EC.getLeaderValue(I), 255);
+  int Expected = 255;
+  for (int Member : EC.members(0))
+    EXPECT_EQ(Member, Expected--);
+  EXPECT_EQ(Expected, -1);
+
+  EXPECT_TRUE(EC.erase(255));
+  for (int I = 0; I != 255; ++I)
+    EXPECT_EQ(EC.getLeaderValue(I), 254);
+}
+
 // Type-parameterized tests: Run the same test cases with different element
 // types.
 template <typename T> class ParameterizedTest : public testing::Test {};

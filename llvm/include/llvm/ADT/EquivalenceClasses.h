@@ -85,12 +85,16 @@ public:
           Data(Elt) {}
 
     const ECValue *getLeader() const {
-      if (isLeader())
-        return this;
-      if (Leader->isLeader())
-        return Leader;
-      // Path compression.
-      return Leader = Leader->getLeader();
+      const ECValue *Current = this;
+      while (!Current->isLeader()) {
+        const ECValue *Parent = Current->Leader;
+        if (Parent->isLeader())
+          return Parent;
+        // Skip every other node without reading a leader's end-of-list pointer.
+        Current->Leader = Parent->Leader;
+        Current = Current->Leader;
+      }
+      return Current;
     }
 
     const ECValue *getEndOfList() const {
