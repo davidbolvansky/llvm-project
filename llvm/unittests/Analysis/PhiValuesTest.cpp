@@ -208,3 +208,57 @@ TEST(PhiValuesTest, DependentPhi) {
   EXPECT_TRUE(Vals.count(Val1));
   EXPECT_TRUE(Vals.count(Val2));
 }
+
+TEST(PhiValuesTest, CyclicComponentsAndInvalidation) {
+  LLVMContext C;
+  Module M("PhiValuesTest", C);
+  Type *I32Ty = Type::getInt32Ty(C);
+  Function *F = Function::Create(FunctionType::get(Type::getVoidTy(C), false),
+                                 Function::ExternalLinkage, "f", M);
+  BasicBlock *Entry = BasicBlock::Create(C, "entry", F);
+  BasicBlock *Header = BasicBlock::Create(C, "loop.header", F);
+  BasicBlock *Latch = BasicBlock::Create(C, "loop.latch", F);
+  UncondBrInst::Create(Header, Entry);
+  UncondBrInst::Create(Latch, Header);
+  UncondBrInst::Create(Header, Latch);
+
+  SmallVector<PHINode *> Phis;
+  SmallVector<Constant *> Values;
+  for (unsigned I = 0; I != 5; ++I) {
+    Phis.push_back(PHINode::Create(I32Ty, 2, "phi",
+                                   Header->getTerminator()->getIterator()));
+    Values.push_back(ConstantInt::get(I32Ty, I + 1));
+    Phis.back()->addIncoming(Values.back(), Entry);
+  }
+  Phis[0]->addIncoming(Phis[1], Latch);
+  Phis[1]->addIncoming(Phis[2], Latch);
+  Phis[2]->addIncoming(Phis[0], Latch);
+  Phis[3]->addIncoming(Phis[3], Latch);
+  Phis[4]->addIncoming(Phis[3], Latch);
+
+  PhiValues PV(*F);
+  for (unsigned I = 0; I != 3; ++I) {
+    const auto &Reachable = PV.getValuesForPhi(Phis[I]);
+    EXPECT_EQ(Reachable.size(), 3u);
+    for (unsigned J = 0; J != 3; ++J)
+      EXPECT_TRUE(Reachable.count(Values[J]));
+  }
+  EXPECT_EQ(PV.getValuesForPhi(Phis[3]).size(), 1u);
+  const auto &Dependent = PV.getValuesForPhi(Phis[4]);
+  EXPECT_EQ(Dependent.size(), 2u);
+  EXPECT_TRUE(Dependent.count(Values[3]));
+  EXPECT_TRUE(Dependent.count(Values[4]));
+
+  Phis[2]->setIncomingValue(0, Values[4]);
+  PV.invalidateValue(Phis[2]);
+  for (unsigned I = 0; I != 3; ++I) {
+    const auto &Reachable = PV.getValuesForPhi(Phis[I]);
+    EXPECT_EQ(Reachable.size(), 3u);
+    EXPECT_TRUE(Reachable.count(Values[0]));
+    EXPECT_TRUE(Reachable.count(Values[1]));
+    EXPECT_TRUE(Reachable.count(Values[4]));
+    EXPECT_FALSE(Reachable.count(Values[2]));
+  }
+  EXPECT_EQ(PV.getValuesForPhi(Phis[3]).size(), 1u);
+  EXPECT_EQ(PV.getValuesForPhi(Phis[4]).size(), 2u);
+}

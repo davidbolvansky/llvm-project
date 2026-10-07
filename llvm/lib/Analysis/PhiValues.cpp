@@ -52,7 +52,8 @@ void PhiValues::processPhi(const PHINode *Phi,
   assert(DepthMap.lookup(Phi) == 0);
   assert(NextDepthNumber != UINT_MAX);
   unsigned int RootDepthNumber = ++NextDepthNumber;
-  DepthMap[Phi] = RootDepthNumber;
+  unsigned int DepthNumber = RootDepthNumber;
+  DepthMap[Phi] = DepthNumber;
 
   // Recursively process the incoming phis of this phi.
   TrackedValues.insert(PhiValuesCallbackVH(const_cast<PHINode *>(Phi), this));
@@ -67,9 +68,10 @@ void PhiValues::processPhi(const PHINode *Phi,
       }
       // If the phi did not become part of a component then this phi and that
       // phi are part of the same component, so adjust the depth number.
-      if (!ReachableMap.count(OpDepthNumber)) {
-        unsigned &Depth = DepthMap[Phi];
-        Depth = std::min(Depth, OpDepthNumber);
+      if (OpDepthNumber < DepthNumber && !ReachableMap.count(OpDepthNumber)) {
+        DepthNumber = OpDepthNumber;
+        // Recursive visits must see the updated component depth.
+        DepthMap[Phi] = DepthNumber;
       }
     } else {
       TrackedValues.insert(PhiValuesCallbackVH(PhiOp, this));
@@ -81,7 +83,7 @@ void PhiValues::processPhi(const PHINode *Phi,
 
   // If the depth number has not changed then we've finished collecting the phis
   // of a strongly connected component.
-  if (DepthMap[Phi] == RootDepthNumber) {
+  if (DepthNumber == RootDepthNumber) {
     // Collect the reachable values for this component. The phis of this
     // component will be those on top of the depth stack with the same or
     // greater depth number.
