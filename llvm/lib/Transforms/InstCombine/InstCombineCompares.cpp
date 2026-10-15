@@ -7191,6 +7191,12 @@ Instruction *InstCombinerImpl::foldICmpUsingKnownBits(ICmpInst &I) {
     PropagateSignBit(Op1Known, Op0Known);
   }
 
+  // None of the range folds below apply if both operands are non-constant and
+  // we know no bits about either of them.
+  if (!isa<Constant>(Op0) && !isa<Constant>(Op1) && Op0Known.isUnknown() &&
+      Op1Known.isUnknown())
+    return nullptr;
+
   if (!isa<Constant>(Op0) && Op0Known.isConstant())
     return new ICmpInst(
         Pred, ConstantExpr::getIntegerValue(Ty, Op0Known.getConstant()), Op1);
