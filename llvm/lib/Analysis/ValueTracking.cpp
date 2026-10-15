@@ -1108,6 +1108,9 @@ void llvm::computeKnownBitsFromContext(const Value *V, KnownBits &Known,
   if (!Q.AC)
     return;
 
+  if (Q.AC->assumptions().empty())
+    return;
+
   unsigned BitWidth = Known.getBitWidth();
 
   // Note that the patterns below need to be kept in sync with the code
