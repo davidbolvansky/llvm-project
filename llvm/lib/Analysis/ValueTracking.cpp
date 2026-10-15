@@ -1544,9 +1544,10 @@ static void computeKnownBitsFromOperator(const Operator *I,
       return Res;
     };
     // Only known if known in both the LHS and RHS.
-    Known =
-        ComputeForArm(I->getOperand(1), /*Invert=*/false)
-            .intersectWith(ComputeForArm(I->getOperand(2), /*Invert=*/true));
+    Known = ComputeForArm(I->getOperand(1), /*Invert=*/false);
+    if (!Known.isUnknown())
+      Known =
+          Known.intersectWith(ComputeForArm(I->getOperand(2), /*Invert=*/true));
     break;
   }
   case Instruction::FPToSI: {
