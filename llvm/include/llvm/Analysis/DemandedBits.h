@@ -80,11 +80,14 @@ public:
                                                     const KnownBits &RHS);
 
 private:
+  struct OperandKnownBitsCache;
+
   void performAnalysis();
-  void determineLiveOperandBits(const Instruction *UserI,
-    const Value *Val, unsigned OperandNo,
-    const APInt &AOut, APInt &AB,
-    KnownBits &Known, KnownBits &Known2, bool &KnownBitsComputed);
+  void determineLiveOperandBits(const Instruction *UserI, const Value *Val,
+                                unsigned OperandNo, const APInt &AOut,
+                                APInt &AB, KnownBits &Known, KnownBits &Known2,
+                                bool &KnownBitsComputed,
+                                OperandKnownBitsCache *Cache = nullptr);
 
   Function &F;
   AssumptionCache &AC;

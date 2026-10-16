@@ -39,6 +39,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cstdint>
+#include <utility>
 
 using namespace llvm;
 using namespace llvm::PatternMatch;
@@ -49,10 +50,16 @@ static bool isAlwaysLive(Instruction *I) {
   return I->isTerminator() || I->isEHPad() || I->mayHaveSideEffects();
 }
 
+// The IR and query contexts stay unchanged while the liveness worklist runs.
+// Operand facts can therefore be reused when a user's demanded bits change.
+struct DemandedBits::OperandKnownBitsCache {
+  DenseMap<const Instruction *, std::pair<KnownBits, KnownBits>> Facts;
+};
+
 void DemandedBits::determineLiveOperandBits(
     const Instruction *UserI, const Value *Val, unsigned OperandNo,
     const APInt &AOut, APInt &AB, KnownBits &Known, KnownBits &Known2,
-    bool &KnownBitsComputed) {
+    bool &KnownBitsComputed, OperandKnownBitsCache *Cache) {
   unsigned BitWidth = AB.getBitWidth();
 
   // We're called once per operand, but for some instructions, we need to
@@ -67,6 +74,15 @@ void DemandedBits::determineLiveOperandBits(
           return;
         KnownBitsComputed = true;
 
+        if (Cache) {
+          auto It = Cache->Facts.find(UserI);
+          if (It != Cache->Facts.end()) {
+            Known = It->second.first;
+            Known2 = It->second.second;
+            return;
+          }
+        }
+
         const DataLayout &DL = UserI->getDataLayout();
         Known = KnownBits(BitWidth);
         computeKnownBits(V1, Known, DL, &AC, UserI, &DT);
@@ -75,6 +91,10 @@ void DemandedBits::determineLiveOperandBits(
           Known2 = KnownBits(BitWidth);
           computeKnownBits(V2, Known2, DL, &AC, UserI, &DT);
         }
+        // Demanded bits only grow. Once all output bits are live, this
+        // instruction cannot be revisited with a larger demanded mask.
+        if (Cache && !AOut.isAllOnes())
+          Cache->Facts.try_emplace(UserI, Known, Known2);
       };
   auto GetShiftedRange = [&](uint64_t Min, uint64_t Max, bool ShiftLeft) {
     auto ShiftF = [ShiftLeft](const APInt &Mask, unsigned ShiftAmnt) {
@@ -367,6 +387,7 @@ void DemandedBits::performAnalysis() {
   DeadUses.clear();
 
   SmallSetVector<Instruction*, 16> Worklist;
+  OperandKnownBitsCache KnownBitsCache;
 
   // Collect the set of "root" instructions that are known live.
   for (Instruction &I : instructions(F)) {
@@ -443,7 +464,8 @@ void DemandedBits::performAnalysis() {
           // Bits of each operand that are used to compute alive bits of the
           // output are alive, all others are dead.
           determineLiveOperandBits(UserI, OI, OI.getOperandNo(), AOut, AB,
-                                   Known, Known2, KnownBitsComputed);
+                                   Known, Known2, KnownBitsComputed,
+                                   &KnownBitsCache);
 
           // Keep track of uses which have no demanded bits.
           if (AB.isZero())
