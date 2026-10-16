@@ -749,7 +749,8 @@ bool ScheduleDAGTopologicalSort::IsReachable(const SUnit *SU,
     }
     Visited.reset();
     // There may be a path from TargetSU to SU. Check for it.
-    // Reachability is symmetric under reversing the graph. Prefer starting
+    // A path TargetSU -> SU exists iff a reversed path SU -> TargetSU does.
+    // Prefer starting
     // from the smaller adjacency list; unlike AddPred, this query needs only
     // the boolean result, not the forward reachable set used by Shift.
     if (SU->Preds.size() < TargetSU->Succs.size()) {
