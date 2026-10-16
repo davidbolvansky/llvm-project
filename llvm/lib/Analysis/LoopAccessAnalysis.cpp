@@ -2546,9 +2546,10 @@ void AccessAnalysis::buildDependenceSets() {
 
           // Create sets of pointers connected by a shared alias set and
           // underlying object.
-          SmallVector<const Value *, 16> &UOs = UnderlyingObjects[Ptr];
-          UOs = {};
-          ::getUnderlyingObjects(Ptr, UOs, LI);
+          auto [UOIt, Inserted] = UnderlyingObjects.try_emplace(Ptr);
+          SmallVector<const Value *, 16> &UOs = UOIt->second;
+          if (Inserted)
+            ::getUnderlyingObjects(Ptr, UOs, LI);
           LLVM_DEBUG(dbgs()
                      << "Underlying objects for pointer " << *Ptr << "\n");
           for (const Value *UnderlyingObj : UOs) {
