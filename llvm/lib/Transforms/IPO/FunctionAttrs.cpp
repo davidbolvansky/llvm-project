@@ -1115,7 +1115,9 @@ static bool addAccessAttrs(Argument *A, ArgAccessProperties Props) {
   return true;
 }
 
-static bool inferInitializes(Argument &A, Function &F) {
+static bool inferInitializes(
+    Argument &A, Function &F,
+    std::optional<SmallVector<const BasicBlock *, 16>> &CFGPostOrder) {
   auto ArgumentUses = collectArgumentUsesPerBlock(A, F);
   // No write anywhere in the function, bail.
   if (!ArgumentUses.HasAnyWrite)
@@ -1204,7 +1206,11 @@ static bool inferInitializes(Argument &A, Function &F) {
     // by a block include both accesses inside this block and accesses in its
     // (transitive) successors. So visit successors before predecessors with a
     // post-order walk of the blocks and memorize the results in "Initialized".
-    for (const BasicBlock *BB : post_order(&F)) {
+    if (!CFGPostOrder) {
+      CFGPostOrder.emplace();
+      append_range(*CFGPostOrder, post_order(&F));
+    }
+    for (const BasicBlock *BB : *CFGPostOrder) {
       ConstantRangeList CRL = VisitBlock(BB);
       if (!CRL.empty())
         Initialized[BB] = CRL;
@@ -1273,6 +1279,9 @@ static void addArgumentAttrs(const SCCNodeSet &SCCNodes,
       continue;
     }
 
+    // Attribute inference does not change the CFG, so all pointer arguments
+    // can share the traversal order if initializes inference needs it.
+    std::optional<SmallVector<const BasicBlock *, 16>> CFGPostOrder;
     for (Argument &A : F->args()) {
       if (!A.getType()->isPointerTy())
         continue;
@@ -1312,7 +1321,7 @@ static void addArgumentAttrs(const SCCNodeSet &SCCNodes,
           Changed.insert(F);
       }
       if (!SkipInitializes && !A.onlyReadsMemory()) {
-        if (inferInitializes(A, *F))
+        if (inferInitializes(A, *F, CFGPostOrder))
           Changed.insert(F);
       }
     }
