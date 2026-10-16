@@ -356,8 +356,11 @@ MemDepResult MemoryDependenceResults::getSimplePointerDependencyFrom(
     BasicBlock *BB, Instruction *QueryInst, unsigned *Limit,
     BatchAAResults &BatchAA) {
   bool isInvariantLoad = false;
+  const auto *QueryLoad =
+      isLoad ? dyn_cast_or_null<LoadInst>(QueryInst) : nullptr;
   Align MemLocAlign =
-      MemLoc.Ptr->getPointerAlignment(BB->getDataLayout());
+      QueryLoad ? QueryLoad->getAlign()
+                : MemLoc.Ptr->getPointerAlignment(BB->getDataLayout());
 
   unsigned DefaultLimit = getDefaultBlockScanLimit();
   if (!Limit)
@@ -397,8 +400,6 @@ MemDepResult MemoryDependenceResults::getSimplePointerDependencyFrom(
   // Arguably, this logic should be pushed inside AliasAnalysis itself.
   if (isLoad && QueryInst) {
     isInvariantLoad = QueryInst->hasMetadata(LLVMContext::MD_invariant_load);
-    if (LoadInst *LI = dyn_cast<LoadInst>(QueryInst))
-      MemLocAlign = LI->getAlign();
   }
 
   // True for volatile instruction.
