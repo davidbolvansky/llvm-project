@@ -1505,6 +1505,9 @@ static void computeKnownBitsFromOperator(const Operator *I,
     break;
   case Instruction::Or:
     computeKnownBits(I->getOperand(1), DemandedElts, Known, Q, Depth + 1);
+    // The other operand cannot change an all-one result.
+    if (Known.One.isAllOnes())
+      break;
     computeKnownBits(I->getOperand(0), DemandedElts, Known2, Q, Depth + 1);
 
     Known = getKnownBitsFromAndXorOr(I, DemandedElts, Known2, Known, Q, Depth);
