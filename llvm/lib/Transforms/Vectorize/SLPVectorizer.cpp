@@ -181,6 +181,7 @@ class slpvectorizer::BoUpSLP {
   class ScheduleBundle;
   class ShuffleCostEstimator;
   class ShuffleInstructionBuilder;
+  class DemotionValueTracking;
 
 public:
   /// If we decide to generate strided load / store, this struct contains all
@@ -2273,11 +2274,14 @@ private:
   /// truncation. We collect the entries that will be demoted in ToDemote.
   /// \param E Node for analysis
   /// \param ToDemote indices of the nodes to be demoted.
-  bool collectValuesToDemote(
-      const TreeEntry &E, bool IsProfitableToDemoteRoot, unsigned &BitWidth,
-      SmallVectorImpl<unsigned> &ToDemote, DenseSet<const TreeEntry *> &Visited,
-      const SmallDenseSet<unsigned, 8> &NodesToKeepBWs, unsigned &MaxDepthLevel,
-      bool &IsProfitableToDemote, bool IsTruncRoot) const;
+  bool collectValuesToDemote(const TreeEntry &E, bool IsProfitableToDemoteRoot,
+                             unsigned &BitWidth,
+                             SmallVectorImpl<unsigned> &ToDemote,
+                             DenseSet<const TreeEntry *> &Visited,
+                             const SmallDenseSet<unsigned, 8> &NodesToKeepBWs,
+                             unsigned &MaxDepthLevel,
+                             bool &IsProfitableToDemote, bool IsTruncRoot,
+                             DemotionValueTracking &ValueTracking) const;
 
   /// Builds the list of reorderable operands on the edges \p Edges of the \p
   /// UserTE, which allow reordering (i.e. the operands can be reordered because
@@ -28598,11 +28602,50 @@ unsigned BoUpSLP::getVectorElementSize(Value *V) {
   return Width;
 }
 
+// Reuse value facts while selecting demoted widths. This analysis does not
+// mutate IR. Keep the context-free known-bits queries separate from sign-bit
+// queries, which also use the assumption cache and dominator tree.
+class BoUpSLP::DemotionValueTracking {
+  const DataLayout &DL;
+  AssumptionCache *AC;
+  const DominatorTree *DT;
+  DenseMap<const Value *, KnownBits> KnownBitsCache;
+  DenseMap<const Value *, unsigned> SignBitsCache;
+
+  const KnownBits &getKnownBits(const Value *V) {
+    auto It = KnownBitsCache.find(V);
+    if (It != KnownBitsCache.end())
+      return It->second;
+    KnownBits Known = computeKnownBits(V, SimplifyQuery(DL));
+    return KnownBitsCache.try_emplace(V, std::move(Known)).first->second;
+  }
+
+public:
+  DemotionValueTracking(const DataLayout &DL, AssumptionCache *AC,
+                        const DominatorTree *DT)
+      : DL(DL), AC(AC), DT(DT) {}
+
+  bool isNonNegative(const Value *V) { return getKnownBits(V).isNonNegative(); }
+
+  bool maskedValueIsZero(const Value *V, const APInt &Mask) {
+    return Mask.isSubsetOf(getKnownBits(V).Zero);
+  }
+
+  unsigned getNumSignBits(const Value *V) {
+    auto It = SignBitsCache.find(V);
+    if (It != SignBitsCache.end())
+      return It->second;
+    unsigned NumSignBits = ComputeNumSignBits(V, DL, AC, nullptr, DT);
+    return SignBitsCache.try_emplace(V, NumSignBits).first->second;
+  }
+};
+
 bool BoUpSLP::collectValuesToDemote(
     const TreeEntry &E, bool IsProfitableToDemoteRoot, unsigned &BitWidth,
     SmallVectorImpl<unsigned> &ToDemote, DenseSet<const TreeEntry *> &Visited,
     const SmallDenseSet<unsigned, 8> &NodesToKeepBWs, unsigned &MaxDepthLevel,
-    bool &IsProfitableToDemote, bool IsTruncRoot) const {
+    bool &IsProfitableToDemote, bool IsTruncRoot,
+    DemotionValueTracking &ValueTracking) const {
   // We can always demote constants.
   if (all_of(E.Scalars, IsaPred<Constant>))
     return true;
@@ -28624,7 +28667,7 @@ bool BoUpSLP::collectValuesToDemote(
   bool IsSignedNode = any_of(E.Scalars, [&](Value *R) {
     if (isa<PoisonValue>(R))
       return false;
-    return !isKnownNonNegative(R, SimplifyQuery(*DL));
+    return !ValueTracking.isNonNegative(R);
   });
   auto IsPotentiallyTruncated = [&](Value *V, unsigned &BitWidth) -> bool {
     if (isa<PoisonValue>(V))
@@ -28634,13 +28677,13 @@ bool BoUpSLP::collectValuesToDemote(
     // For lat shuffle of sext/zext with many uses need to check the extra bit
     // for unsigned values, otherwise may have incorrect casting for reused
     // scalars.
-    bool IsSignedVal = !isKnownNonNegative(V, SimplifyQuery(*DL));
+    bool IsSignedVal = !ValueTracking.isNonNegative(V);
     if ((!IsSignedNode || IsSignedVal) && OrigBitWidth > BitWidth) {
       APInt Mask = APInt::getBitsSetFrom(OrigBitWidth, BitWidth);
-      if (MaskedValueIsZero(V, Mask, SimplifyQuery(*DL)))
+      if (ValueTracking.maskedValueIsZero(V, Mask))
         return true;
     }
-    unsigned NumSignBits = ComputeNumSignBits(V, *DL, AC, nullptr, DT);
+    unsigned NumSignBits = ValueTracking.getNumSignBits(V);
     unsigned BitWidth1 = OrigBitWidth - NumSignBits;
     if (IsSignedNode)
       ++BitWidth1;
@@ -28650,7 +28693,7 @@ bool BoUpSLP::collectValuesToDemote(
           std::max<unsigned>(1, Mask.getBitWidth() - Mask.countl_zero());
       while (!IsSignedNode && BitWidth2 < OrigBitWidth) {
         APInt Mask = APInt::getBitsSetFrom(OrigBitWidth, BitWidth2 - 1);
-        if (MaskedValueIsZero(V, Mask, SimplifyQuery(*DL)))
+        if (ValueTracking.maskedValueIsZero(V, Mask))
           break;
         BitWidth2 *= 2;
       }
@@ -28672,7 +28715,7 @@ bool BoUpSLP::collectValuesToDemote(
           if (collectValuesToDemote(*SameTE, IsProfitableToDemoteRoot, BitWidth,
                                     ToDemote, Visited, NodesToKeepBWs,
                                     MaxDepthLevel, IsProfitableToDemote,
-                                    IsTruncRoot)) {
+                                    IsTruncRoot, ValueTracking)) {
             ToDemote.push_back(E.Idx);
             return true;
           }
@@ -28726,7 +28769,8 @@ bool BoUpSLP::collectValuesToDemote(
       unsigned Level = InitLevel;
       if (!collectValuesToDemote(*Op, IsProfitableToDemoteRoot, BitWidth,
                                  ToDemote, Visited, NodesToKeepBWs, Level,
-                                 IsProfitableToDemote, IsTruncRoot)) {
+                                 IsProfitableToDemote, IsTruncRoot,
+                                 ValueTracking)) {
         if (!IsProfitableToDemote)
           return false;
         NeedToExit = true;
@@ -28879,12 +28923,11 @@ bool BoUpSLP::collectValuesToDemote(
           return true;
         APInt ShiftedBits = APInt::getBitsSetFrom(OrigBitWidth, BitWidth);
         if (E.isCopyableElement(V))
-          return MaskedValueIsZero(V, ShiftedBits, SimplifyQuery(*DL));
+          return ValueTracking.maskedValueIsZero(V, ShiftedBits);
         auto *I = cast<Instruction>(V);
         KnownBits AmtKnownBits = computeKnownBits(I->getOperand(1), *DL);
         return AmtKnownBits.getMaxValue().ult(BitWidth) &&
-               MaskedValueIsZero(I->getOperand(0), ShiftedBits,
-                                 SimplifyQuery(*DL));
+               ValueTracking.maskedValueIsZero(I->getOperand(0), ShiftedBits);
       });
     };
     return TryProcessInstruction(
@@ -28901,12 +28944,11 @@ bool BoUpSLP::collectValuesToDemote(
           return true;
         unsigned ShiftedBits = OrigBitWidth - BitWidth;
         if (E.isCopyableElement(V))
-          return ShiftedBits < ComputeNumSignBits(V, *DL, AC, nullptr, DT);
+          return ShiftedBits < ValueTracking.getNumSignBits(V);
         auto *I = cast<Instruction>(V);
         KnownBits AmtKnownBits = computeKnownBits(I->getOperand(1), *DL);
         return AmtKnownBits.getMaxValue().ult(BitWidth) &&
-               ShiftedBits <
-                   ComputeNumSignBits(I->getOperand(0), *DL, AC, nullptr, DT);
+               ShiftedBits < ValueTracking.getNumSignBits(I->getOperand(0));
       });
     };
     return TryProcessInstruction(
@@ -28921,10 +28963,10 @@ bool BoUpSLP::collectValuesToDemote(
       return all_of(E.Scalars, [&](Value *V) {
         APInt Mask = APInt::getBitsSetFrom(OrigBitWidth, BitWidth);
         if (E.hasCopyableElements() && E.isCopyableElement(V))
-          return MaskedValueIsZero(V, Mask, SimplifyQuery(*DL));
+          return ValueTracking.maskedValueIsZero(V, Mask);
         auto *I = cast<Instruction>(V);
-        return MaskedValueIsZero(I->getOperand(0), Mask, SimplifyQuery(*DL)) &&
-               MaskedValueIsZero(I->getOperand(1), Mask, SimplifyQuery(*DL));
+        return ValueTracking.maskedValueIsZero(I->getOperand(0), Mask) &&
+               ValueTracking.maskedValueIsZero(I->getOperand(1), Mask);
       });
     };
     return TryProcessInstruction(
@@ -28964,22 +29006,21 @@ bool BoUpSLP::collectValuesToDemote(
           APInt Mask = APInt::getBitsSetFrom(OrigBitWidth, BitWidth);
           // A copyable V stands for umax/umin(V, identity), which equals V.
           if (E.isCopyableElement(V))
-            return MaskedValueIsZero(V, Mask, SimplifyQuery(*DL));
+            return ValueTracking.maskedValueIsZero(V, Mask);
           auto *I = cast<Instruction>(V);
-          return MaskedValueIsZero(I->getOperand(0), Mask,
-                                   SimplifyQuery(*DL)) &&
-                 MaskedValueIsZero(I->getOperand(1), Mask, SimplifyQuery(*DL));
+          return ValueTracking.maskedValueIsZero(I->getOperand(0), Mask) &&
+                 ValueTracking.maskedValueIsZero(I->getOperand(1), Mask);
         }
         assert((ID == Intrinsic::smin || ID == Intrinsic::smax) &&
                "Expected min/max intrinsics only.");
         unsigned SignBits = OrigBitWidth - BitWidth;
         APInt Mask = APInt::getBitsSetFrom(OrigBitWidth, BitWidth - 1);
         auto CheckOp = [&](Value *Op) {
-          unsigned OpSignBits = ComputeNumSignBits(Op, *DL, AC, nullptr, DT);
+          unsigned OpSignBits = ValueTracking.getNumSignBits(Op);
           return SignBits <= OpSignBits &&
                  ((SignBits != OpSignBits &&
-                   !isKnownNonNegative(Op, SimplifyQuery(*DL))) ||
-                  MaskedValueIsZero(Op, Mask, SimplifyQuery(*DL)));
+                   !ValueTracking.isNonNegative(Op)) ||
+                  ValueTracking.maskedValueIsZero(Op, Mask));
         };
         // A copyable V stands for smax/smin(V, identity), which equals V.
         if (E.isCopyableElement(V))
@@ -28997,12 +29038,11 @@ bool BoUpSLP::collectValuesToDemote(
         auto *I = cast<Instruction>(V);
         unsigned SignBits = OrigBitWidth - BitWidth;
         APInt Mask = APInt::getBitsSetFrom(OrigBitWidth, BitWidth - 1);
-        unsigned Op0SignBits =
-            ComputeNumSignBits(I->getOperand(0), *DL, AC, nullptr, DT);
+        unsigned Op0SignBits = ValueTracking.getNumSignBits(I->getOperand(0));
         return SignBits <= Op0SignBits &&
                ((SignBits != Op0SignBits &&
-                 !isKnownNonNegative(I->getOperand(0), SimplifyQuery(*DL))) ||
-                MaskedValueIsZero(I->getOperand(0), Mask, SimplifyQuery(*DL)));
+                 !ValueTracking.isNonNegative(I->getOperand(0))) ||
+                ValueTracking.maskedValueIsZero(I->getOperand(0), Mask));
       });
     };
     if (ID != Intrinsic::abs) {
@@ -29098,6 +29138,7 @@ void BoUpSLP::computeMinimumValueSizes() {
                          getTreeSizeExcludingGathers()))
     return;
 
+  DemotionValueTracking ValueTracking(*DL, AC, DT);
   SmallVector<unsigned> ToDemote;
   auto ComputeMaxBitWidth =
       [&](const TreeEntry &E, bool IsTopRoot, bool IsProfitableToDemoteRoot,
@@ -29195,7 +29236,7 @@ void BoUpSLP::computeMinimumValueSizes() {
     // we can truncate the roots to this narrower type.
     for (Value *Root : make_filter_range(
              E.Scalars, [](Value *Root) { return !isa<PoisonValue>(Root); })) {
-      unsigned NumSignBits = ComputeNumSignBits(Root, *DL, AC, nullptr, DT);
+      unsigned NumSignBits = ValueTracking.getNumSignBits(Root);
       TypeSize NumTypeBits =
           DL->getTypeSizeInBits(Root->getType()->getScalarType());
       unsigned BitWidth1 = NumTypeBits - NumSignBits;
@@ -29255,7 +29296,7 @@ void BoUpSLP::computeMinimumValueSizes() {
 
     if (!collectValuesToDemote(E, IsProfitableToDemoteRoot, MaxBitWidth,
                                ToDemote, Visited, NodesToKeepBWs, MaxDepthLevel,
-                               NeedToDemote, IsTruncRoot) ||
+                               NeedToDemote, IsTruncRoot, ValueTracking) ||
         (MaxDepthLevel <= Limit &&
          !(((Opcode == Instruction::SExt || Opcode == Instruction::ZExt) &&
             (!IsTopRoot || !(IsStoreOrInsertElt || UserIgnoreList) ||
@@ -29291,10 +29332,10 @@ void BoUpSLP::computeMinimumValueSizes() {
       for (Value *V : make_filter_range(*UserIgnoreList, [](Value *V) {
              return !isa<PoisonValue>(V);
            })) {
-        unsigned NumSignBits = ComputeNumSignBits(V, *DL, AC, nullptr, DT);
+        unsigned NumSignBits = ValueTracking.getNumSignBits(V);
         TypeSize NumTypeBits = DL->getTypeSizeInBits(V->getType());
         unsigned BitWidth1 = NumTypeBits - NumSignBits;
-        if (!isKnownNonNegative(V, SimplifyQuery(*DL)))
+        if (!ValueTracking.isNonNegative(V))
           ++BitWidth1;
         unsigned BitWidth2 = BitWidth1;
         if (!RecurrenceDescriptor::isIntMinMaxRecurrenceKind(::getRdxKind(V))) {
@@ -29347,7 +29388,7 @@ void BoUpSLP::computeMinimumValueSizes() {
                 DL->getTypeSizeInBits(V->getType()->getScalarType());
             if (OrigBitWidth > MaxBitWidth) {
               APInt Mask = APInt::getBitsSetFrom(OrigBitWidth, MaxBitWidth);
-              return MaskedValueIsZero(V, Mask, SimplifyQuery(*DL));
+              return ValueTracking.maskedValueIsZero(V, Mask);
             }
             return false;
           }))
@@ -29385,10 +29426,8 @@ void BoUpSLP::computeMinimumValueSizes() {
                   VectorizableTree[NodeIdx]->UserTreeIndex.UserTE->Scalars),
               [&](ICmpInst *IC) {
                 return IC->isSigned() ||
-                       !isKnownNonNegative(IC->getOperand(0),
-                                           SimplifyQuery(*DL)) ||
-                       !isKnownNonNegative(IC->getOperand(1),
-                                           SimplifyQuery(*DL));
+                       !ValueTracking.isNonNegative(IC->getOperand(0)) ||
+                       !ValueTracking.isNonNegative(IC->getOperand(1));
               });
     }
 
@@ -29416,7 +29455,7 @@ void BoUpSLP::computeMinimumValueSizes() {
       bool IsSigned = any_of(TE->Scalars, [&](Value *R) {
         if (isa<PoisonValue>(R))
           return false;
-        return !isKnownNonNegative(R, SimplifyQuery(*DL));
+        return !ValueTracking.isNonNegative(R);
       });
       MinBWs.try_emplace(TE, MaxBitWidth, IsSigned);
     }
