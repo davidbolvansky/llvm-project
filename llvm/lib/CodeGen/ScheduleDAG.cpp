@@ -749,7 +749,32 @@ bool ScheduleDAGTopologicalSort::IsReachable(const SUnit *SU,
     }
     Visited.reset();
     // There may be a path from TargetSU to SU. Check for it.
-    DFS(TargetSU, UpperBound, HasLoop);
+    // Reachability is symmetric under reversing the graph. Prefer starting
+    // from the smaller adjacency list; unlike AddPred, this query needs only
+    // the boolean result, not the forward reachable set used by Shift.
+    if (SU->Preds.size() < TargetSU->Succs.size()) {
+      WorkList.clear();
+      WorkList.push_back(SU);
+      do {
+        const SUnit *Current = WorkList.back();
+        WorkList.pop_back();
+        Visited.set(Current->NodeNum);
+        for (const SDep &PredDep : llvm::reverse(Current->Preds)) {
+          unsigned P = PredDep.getSUnit()->NodeNum;
+          // Ignore boundary nodes before indexing the topological order.
+          if (P >= Node2Index.size())
+            continue;
+          if (Node2Index[P] == LowerBound) {
+            HasLoop = true;
+            break;
+          }
+          if (!Visited.test(P) && Node2Index[P] > LowerBound)
+            WorkList.push_back(PredDep.getSUnit());
+        }
+      } while (!WorkList.empty() && !HasLoop);
+    } else {
+      DFS(TargetSU, UpperBound, HasLoop);
+    }
     // If there's no loop, cache the result. We only cache negative results,
     // as positive results are not safe to cache; users call SU.removePred()
     // without notifying us.
