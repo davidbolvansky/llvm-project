@@ -761,10 +761,10 @@ class TargetRegisterInfo;
     /// The keys are SUnit NodeNums.
     DenseMap<std::pair<int, int>, bool> Reachable;
 
-    /// Makes a DFS traversal and mark all nodes affected by the edge insertion.
-    /// These nodes will later get new topological indexes by means of the Shift
-    /// method.
-    void DFS(const SUnit *SU, int UpperBound, bool& HasLoop);
+    /// Traverse successor edges below Bound, or predecessor edges above Bound
+    /// when IsForward is false. Set HasLoop if Bound is reached. The default
+    /// forward traversal marks the nodes AddPred needs to reorder with Shift.
+    void DFS(const SUnit *SU, int Bound, bool &HasLoop, bool IsForward = true);
 
     /// Reassigns topological indexes for the nodes in the DAG to
     /// preserve the topological ordering.

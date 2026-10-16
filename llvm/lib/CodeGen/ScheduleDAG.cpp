@@ -579,8 +579,8 @@ void ScheduleDAGTopologicalSort::RemovePred(SUnit *M, SUnit *N) {
   // InitDAGTopologicalSorting();
 }
 
-void ScheduleDAGTopologicalSort::DFS(const SUnit *SU, int UpperBound,
-                                     bool &HasLoop) {
+void ScheduleDAGTopologicalSort::DFS(const SUnit *SU, int Bound,
+                                    bool &HasLoop, bool IsForward) {
   WorkList.clear();
 
   WorkList.push_back(SU);
@@ -588,19 +588,20 @@ void ScheduleDAGTopologicalSort::DFS(const SUnit *SU, int UpperBound,
     SU = WorkList.back();
     WorkList.pop_back();
     Visited.set(SU->NodeNum);
-    for (const SDep &SuccDep : llvm::reverse(SU->Succs)) {
-      unsigned s = SuccDep.getSUnit()->NodeNum;
-      // Edges to non-SUnits are allowed but ignored (e.g. ExitSU).
-      if (s >= Node2Index.size())
+    for (const SDep &Dep :
+         llvm::reverse(IsForward ? SU->Succs : SU->Preds)) {
+      unsigned N = Dep.getSUnit()->NodeNum;
+      // Ignore boundary nodes before indexing the topological order.
+      if (N >= Node2Index.size())
         continue;
-      if (Node2Index[s] == UpperBound) {
+      int Index = Node2Index[N];
+      if (Index == Bound) {
         HasLoop = true;
         return;
       }
-      // Visit successors if not already and in affected region.
-      if (!Visited.test(s) && Node2Index[s] < UpperBound) {
-        WorkList.push_back(SuccDep.getSUnit());
-      }
+      // Stay within the affected region in the chosen direction.
+      if (!Visited.test(N) && (IsForward ? Index < Bound : Index > Bound))
+        WorkList.push_back(Dep.getSUnit());
     }
   } while (!WorkList.empty());
 }
@@ -748,34 +749,12 @@ bool ScheduleDAGTopologicalSort::IsReachable(const SUnit *SU,
       return It->second;
     }
     Visited.reset();
-    // There may be a path from TargetSU to SU. Check for it.
     // A path TargetSU -> SU exists iff a reversed path SU -> TargetSU does.
-    // Prefer starting
-    // from the smaller adjacency list; unlike AddPred, this query needs only
-    // the boolean result, not the forward reachable set used by Shift.
-    if (SU->Preds.size() < TargetSU->Succs.size()) {
-      WorkList.clear();
-      WorkList.push_back(SU);
-      do {
-        const SUnit *Current = WorkList.back();
-        WorkList.pop_back();
-        Visited.set(Current->NodeNum);
-        for (const SDep &PredDep : llvm::reverse(Current->Preds)) {
-          unsigned P = PredDep.getSUnit()->NodeNum;
-          // Ignore boundary nodes before indexing the topological order.
-          if (P >= Node2Index.size())
-            continue;
-          if (Node2Index[P] == LowerBound) {
-            HasLoop = true;
-            break;
-          }
-          if (!Visited.test(P) && Node2Index[P] > LowerBound)
-            WorkList.push_back(PredDep.getSUnit());
-        }
-      } while (!WorkList.empty() && !HasLoop);
-    } else {
-      DFS(TargetSU, UpperBound, HasLoop);
-    }
+    // Start from the smaller adjacency list. Unlike AddPred, this query needs
+    // only the boolean result, not the forward reachable set used by Shift.
+    bool IsForward = SU->Preds.size() >= TargetSU->Succs.size();
+    DFS(IsForward ? TargetSU : SU, IsForward ? UpperBound : LowerBound, HasLoop,
+        IsForward);
     // If there's no loop, cache the result. We only cache negative results,
     // as positive results are not safe to cache; users call SU.removePred()
     // without notifying us.
